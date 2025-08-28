@@ -9,7 +9,7 @@ app.get('/calendar.ics', async (req, res) => {
   try {
     const { server, school, username, password } = req.query;
 
-    // Fallback auf Environment Variables, falls nicht in Query
+    // Fallback auf Environment Variables
     const WEBUNTIS_SERVER = server || process.env.WEBUNTIS_SERVER;
     const WEBUNTIS_SCHOOL = school || process.env.WEBUNTIS_SCHOOL;
     const WEBUNTIS_USER = username || process.env.WEBUNTIS_USER;
@@ -48,20 +48,22 @@ app.get('/calendar.ics', async (req, res) => {
         const inf = lesson.info ? `\n\nInfo: ${lesson.info || ''}` : '';
         const fullinfo = `Teacher: ${teachers}${inf}`;
 
-        // Korrekte lokale Zeit für ICS
-        const startDateObj = new Date(year, month - 1, day, startHour, startMinute);
-        const endDateObj = new Date(year, month - 1, day, endHour, endMinute);
+        // Europe/Berlin UTC+1/2 berücksichtigen
+        // Render läuft in UTC → Stunden in UTC umrechnen
+        const berlinOffsetMinutes = 120; // UTC+2 Sommerzeit, im Winter 60
+        const startDateObj = new Date(Date.UTC(year, month - 1, day, startHour, startMinute - berlinOffsetMinutes));
+        const endDateObj   = new Date(Date.UTC(year, month - 1, day, endHour, endMinute - berlinOffsetMinutes));
 
         return {
-          start: [startDateObj.getFullYear(), startDateObj.getMonth() + 1, startDateObj.getDate(), startDateObj.getHours(), startDateObj.getMinutes()],
-          end: [endDateObj.getFullYear(), endDateObj.getMonth() + 1, endDateObj.getDate(), endDateObj.getHours(), endDateObj.getMinutes()],
+          start: [startDateObj.getUTCFullYear(), startDateObj.getUTCMonth()+1, startDateObj.getUTCDate(), startDateObj.getUTCHours(), startDateObj.getUTCMinutes()],
+          end:   [endDateObj.getUTCFullYear(), endDateObj.getUTCMonth()+1, endDateObj.getUTCDate(), endDateObj.getUTCHours(), endDateObj.getUTCMinutes()],
           title: subjects,
           location: rooms,
           description: fullinfo
         };
       });
 
-    // Merge aufeinanderfolgende Events mit gleichen Daten
+    // Merge aufeinanderfolgende Events
     const mergedEvents = [];
     for (let i = 0; i < events.length; i++) {
       const current = events[i];
@@ -81,7 +83,6 @@ app.get('/calendar.ics', async (req, res) => {
       }
     }
 
-    // ICS erzeugen ohne timezone-Option
     createEvents(mergedEvents, (error, value) => {
       if (error) {
         console.error('Error during calendar creation:', error);
@@ -96,6 +97,11 @@ app.get('/calendar.ics', async (req, res) => {
     console.error('Error when retrieving the timetable:', error);
     res.status(500).send('Error when retrieving the timetable.');
   }
+});
+
+// Optional: Root-Route für Info
+app.get('/', (req, res) => {
+  res.send('ICSUntis läuft! Bitte /calendar.ics aufrufen.');
 });
 
 app.listen(port, () => {

@@ -22,8 +22,8 @@ if (!WEBUNTIS_SERVER || !WEBUNTIS_SCHOOL || !WEBUNTIS_USER || !WEBUNTIS_PASSWORD
 
 // Optional: Mapping von Kurzcodes auf lesbare Namen
 const subjectMap = {
-  'eng_LK_5': 'Englisch LK',
-  'mat_GK_11': 'Mathematik GK',
+  'en_LK_5': 'Englisch LK',
+
   // weitere Abkürzungen hier ergänzen
 };
 

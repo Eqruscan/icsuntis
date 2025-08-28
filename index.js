@@ -5,16 +5,17 @@ import { WebUntis } from 'webuntis';
 const app = express();
 const port = 3979;
 
-app.get('/', async (req, res) => {
+// Route für iCal-Datei
+app.get('/calendar.ics', async (req, res) => {
     try {
-        const { server, school, username, password } = req.query;
-        
-        if (!server & !school & !username & !password) {
-            return res.redirect('https://github.com/tschuerti/icsuntis');
-        }
+        // WebUntis-Zugang über Environment Variables (sicherer)
+        const server = process.env.WEBUNTIS_SERVER;
+        const school = process.env.WEBUNTIS_SCHOOL;
+        const username = process.env.WEBUNTIS_USER;
+        const password = process.env.WEBUNTIS_PASSWORD;
 
         if (!server || !school || !username || !password) {
-            return res.status(400).send('Missing connection data: Please enter server, school, username and password.');
+            return res.status(400).send('Missing WebUntis credentials in environment variables.');
         }
 
         const untis = new WebUntis(school, username, password, server);
@@ -53,6 +54,10 @@ app.get('/', async (req, res) => {
                     title: subjects || 'Stunde',
                     location: rooms,
                     description: fullinfo,
+                    startInputType: 'local',
+                    endInputType: 'local',
+                    startOutputType: 'local',
+                    endOutputType: 'local'
                 };
             });
 
@@ -66,21 +71,21 @@ app.get('/', async (req, res) => {
                 currentEvent.title === nextEvent.title &&
                 currentEvent.location === nextEvent.location &&
                 currentEvent.description === nextEvent.description &&
-                currentEvent.start[0] === nextEvent.start[0] && // Same year
-                currentEvent.start[1] === nextEvent.start[1] && // Same month
-                currentEvent.start[2] === nextEvent.start[2] // Same day
+                currentEvent.start[0] === nextEvent.start[0] &&
+                currentEvent.start[1] === nextEvent.start[1] &&
+                currentEvent.start[2] === nextEvent.start[2]
             ) {
                 mergedEvents.push({
                     ...currentEvent,
                     end: nextEvent.end
                 });
-                i++; // Skip the next event
+                i++;
             } else {
                 mergedEvents.push(currentEvent);
             }
         }
 
-        createEvents(mergedEvents, (error, value) => {
+        createEvents(mergedEvents, { timezone: 'Europe/Berlin' }, (error, value) => {
             if (error) {
                 console.error(error);
                 res.status(500).send('Error during calendar creation.');
@@ -91,10 +96,16 @@ app.get('/', async (req, res) => {
             res.setHeader('Content-Type', 'text/calendar');
             res.send(value);
         });
+
     } catch (error) {
         console.error('Error when retrieving the timetable:', error);
         res.status(500).send('Error when retrieving the timetable.');
     }
+});
+
+// Optional: Root-Route für Info
+app.get('/', (req, res) => {
+    res.send('ICSUntis läuft – iCal-Link: <a href="/calendar.ics">/calendar.ics</a>');
 });
 
 app.listen(port, () => {

@@ -2,81 +2,76 @@ import express from 'express';
 import { createEvents } from 'ics';
 import { WebUntis } from 'webuntis';
 import { DateTime } from 'luxon';
+import dotenv from 'dotenv';
+
+dotenv.config(); // Lädt .env Variablen
 
 const app = express();
 const port = process.env.PORT || 3979;
 
-// In-memory Cache
-const calendarCache = { data: null, timestamp: 0, ttl: 10 * 60 * 1000 };
+// WebUntis Credentials aus .env
+const WEBUNTIS_SERVER   = process.env.WEBUNTIS_SERVER;
+const WEBUNTIS_SCHOOL   = process.env.WEBUNTIS_SCHOOL;
+const WEBUNTIS_USER     = process.env.WEBUNTIS_USER;
+const WEBUNTIS_PASSWORD = process.env.WEBUNTIS_PASSWORD;
 
-// === REMAP: Nur hier die Fächer umbenennen ===
-const remapSubjects = { 
-  'Mathematik': 'Math', 
-  'eng_LK_5': 'ENGLISCH LK',
-  'Englisch': 'ENGLISCH'
+if (!WEBUNTIS_SERVER || !WEBUNTIS_SCHOOL || !WEBUNTIS_USER || !WEBUNTIS_PASSWORD) {
+  console.error('Bitte alle WebUntis-Umgebungsvariablen setzen: WEBUNTIS_SERVER, WEBUNTIS_SCHOOL, WEBUNTIS_USER, WEBUNTIS_PASSWORD');
+  process.exit(1);
+}
+
+// Optional: Mapping von Kurzcodes auf lesbare Namen
+const subjectMap = {
+  'eng_LK_5': 'Englisch LK',
+  'mat_GK_11': 'Mathematik GK',
+  // weitere Abkürzungen hier ergänzen
 };
 
-// Helper: Nur Subjects remappen
-const applyRemap = (lesson) => {
-  const subjects = (lesson.su || []).map(sub => remapSubjects[sub.longname] || sub.longname).join(', ') || 'Stunde';
-  const rooms = lesson.ro ? lesson.ro.map(r => r.name).join(', ') : 'No room specified';
-  const teachers = lesson.te ? lesson.te.map(t => t.longname).join(', ') : 'No teacher specified';
-  const inf = lesson.info ? `\n\nInfo: ${lesson.info}` : '';
-  const fullinfo = `Teacher: ${teachers}${inf}`;
-  return { subjects, rooms, fullinfo };
-};
-
-// Helper: Env or query
-const getCred = (queryValue, envVar) => queryValue || envVar;
-
-// === CALENDAR ROUTE ===
 app.get('/calendar.ics', async (req, res) => {
   try {
-    // Cache prüfen
-    if (calendarCache.data && Date.now() - calendarCache.timestamp < calendarCache.ttl) {
-      return res.set({
-        'Content-Disposition': 'attachment; filename="timetable.ics"',
-        'Content-Type': 'text/calendar'
-      }).send(calendarCache.data);
-    }
-
-    const { server, school, username, password } = req.query;
-    const WEBUNTIS_SERVER = getCred(server, process.env.WEBUNTIS_SERVER);
-    const WEBUNTIS_SCHOOL = getCred(school, process.env.WEBUNTIS_SCHOOL);
-    const WEBUNTIS_USER = getCred(username, process.env.WEBUNTIS_USER);
-    const WEBUNTIS_PASSWORD = getCred(password, process.env.WEBUNTIS_PASSWORD);
-
-    if (!WEBUNTIS_SERVER || !WEBUNTIS_SCHOOL || !WEBUNTIS_USER || !WEBUNTIS_PASSWORD) {
-      return res.status(400).send('Missing WebUntis credentials.');
-    }
-
     const untis = new WebUntis(WEBUNTIS_SCHOOL, WEBUNTIS_USER, WEBUNTIS_PASSWORD, WEBUNTIS_SERVER);
     await untis.login();
 
     const startDate = DateTime.now().minus({ months: 2 }).toJSDate();
-    const endDate = DateTime.now().plus({ months: 2 }).toJSDate();
+    const endDate   = DateTime.now().plus({ months: 2 }).toJSDate();
+
     const timetable = await untis.getOwnTimetableForRange(startDate, endDate);
 
+    if (!timetable.length) {
+      return res.status(200).send('Keine Stunden in diesem Zeitraum gefunden.');
+    }
+
+    // Lessons zu ICS Events konvertieren
     const events = timetable
-      .filter(l => l.code !== 'cancelled')
+      .filter(lesson => lesson.code !== 'cancelled')
       .map(lesson => {
         const dateStr = String(lesson.date).padStart(8, '0');
         const year = parseInt(dateStr.slice(0, 4));
         const month = parseInt(dateStr.slice(4, 6));
         const day = parseInt(dateStr.slice(6, 8));
+
         const startHour = Math.floor(lesson.startTime / 100);
         const startMinute = lesson.startTime % 100;
         const endHour = Math.floor(lesson.endTime / 100);
         const endMinute = lesson.endTime % 100;
-        const { subjects, rooms, fullinfo } = applyRemap(lesson);
+
+        // Fächer korrekt bestimmen
+        const subjects = (lesson.su || [])
+          .map(sub => subjectMap[sub.name] || sub.longname || sub.name || 'Stunde')
+          .join(', ');
+
+        const rooms = lesson.ro ? lesson.ro.map(r => r.name).join(', ') : 'Kein Raum angegeben';
+        const teachers = lesson.te ? lesson.te.map(t => t.longname).join(', ') : 'Kein Lehrer angegeben';
+        const inf = lesson.info ? `\n\nInfo: ${lesson.info}` : '';
+        const fullinfo = `Lehrer: ${teachers}${inf}`;
 
         const startDT = DateTime.fromObject(
-          { year, month, day, hour: startHour, minute: startMinute }, 
+          { year, month, day, hour: startHour, minute: startMinute },
           { zone: 'Europe/Berlin' }
         ).toUTC();
 
         const endDT = DateTime.fromObject(
-          { year, month, day, hour: endHour, minute: endMinute }, 
+          { year, month, day, hour: endHour, minute: endMinute },
           { zone: 'Europe/Berlin' }
         ).toUTC();
 
@@ -89,16 +84,27 @@ app.get('/calendar.ics', async (req, res) => {
         };
       });
 
-    // Merge consecutive events
+    // Events zusammenführen
     const mergedEvents = [];
     let current = events[0];
     for (let i = 1; i < events.length; i++) {
       const next = events[i];
+
+      const currentEndMillis = DateTime.fromObject({
+        year: current.end[0], month: current.end[1], day: current.end[2],
+        hour: current.end[3], minute: current.end[4]
+      }).toMillis();
+
+      const nextStartMillis = DateTime.fromObject({
+        year: next.start[0], month: next.start[1], day: next.start[2],
+        hour: next.start[3], minute: next.start[4]
+      }).toMillis();
+
       if (
         current.title === next.title &&
         current.location === next.location &&
         current.description === next.description &&
-        current.end.join() === next.start.join()
+        currentEndMillis === nextStartMillis
       ) {
         current.end = next.end;
       } else {
@@ -108,31 +114,27 @@ app.get('/calendar.ics', async (req, res) => {
     }
     if (current) mergedEvents.push(current);
 
-    createEvents(mergedEvents, (err, value) => {
-      if (err) return res.status(500).send('Error generating calendar.');
-      calendarCache.data = value;
-      calendarCache.timestamp = Date.now();
-      res.set({
-        'Content-Disposition': 'attachment; filename="timetable.ics"',
-        'Content-Type': 'text/calendar'
-      }).send(value);
+    // ICS-Datei erstellen
+    createEvents(mergedEvents, (error, value) => {
+      if (error) {
+        console.error('Fehler beim Erstellen der ICS:', error);
+        return res.status(500).send('Fehler beim Erstellen der ICS.');
+      }
+      res.setHeader('Content-Disposition', 'attachment; filename="timetable.ics"');
+      res.setHeader('Content-Type', 'text/calendar');
+      res.send(value);
     });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).send('Error fetching timetable.');
+  } catch (error) {
+    console.error('Fehler beim Abrufen des Stundenplans:', error);
+    res.status(500).send('Fehler beim Abrufen des Stundenplans.');
   }
 });
 
-// Root redirects to calendar
+// Root leitet auf /calendar.ics weiter
 app.get('/', (req, res) => {
-  const params = new URLSearchParams({
-    server: process.env.WEBUNTIS_SERVER,
-    school: process.env.WEBUNTIS_SCHOOL,
-    username: process.env.WEBUNTIS_USER,
-    password: process.env.WEBUNTIS_PASSWORD
-  });
-  res.redirect(`/calendar.ics?${params.toString()}`);
+  res.redirect('/calendar.ics');
 });
 
-app.listen(port, () => console.log(`ICSUntis running on port ${port}`));
+app.listen(port, () => {
+  console.log(`ICSUntis läuft auf Port ${port}`);
+});

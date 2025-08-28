@@ -2,41 +2,37 @@ import express from 'express';
 import { createEvents } from 'ics';
 import { WebUntis } from 'webuntis';
 import { DateTime } from 'luxon';
-import bodyParser from 'body-parser';
 
 const app = express();
 const port = process.env.PORT || 3979;
 
-// Middleware to parse JSON and form data
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(bodyParser.json());
-
-// In-memory cache
+// In-memory Cache
 const calendarCache = { data: null, timestamp: 0, ttl: 10 * 60 * 1000 };
 
-// Remapping configuration (editable via web interface)
-const remap = {
-  subjects: { 'Mathematik': 'Math', 'Englisch': 'English' },
-  rooms: { 'Raum 101': 'Room 101' },
-  teachers: { 'Müller': 'Mr. Müller' }
+// === REMAP: Nur hier die Fächer umbenennen ===
+const remapSubjects = { 
+  'Mathematik': 'Math', 
+  'eng_LK_5': 'ENGLISCH LK',
+  'Englisch': 'ENGLISCH'
 };
 
-// Helper to safely get env or query param
-const getCred = (queryValue, envVar) => queryValue || envVar;
-
-// Apply remapping
+// Helper: Nur Subjects remappen
 const applyRemap = (lesson) => {
-  const subjects = (lesson.su || []).map(sub => remap.subjects[sub.longname] || sub.longname).join(', ') || 'Stunde';
-  const rooms = lesson.ro ? lesson.ro.map(r => remap.rooms[r.name] || r.name).join(', ') : 'No room specified';
-  const teachers = lesson.te ? lesson.te.map(t => remap.teachers[t.longname] || t.longname).join(', ') : 'No teacher specified';
+  const subjects = (lesson.su || []).map(sub => remapSubjects[sub.longname] || sub.longname).join(', ') || 'Stunde';
+  const rooms = lesson.ro ? lesson.ro.map(r => r.name).join(', ') : 'No room specified';
+  const teachers = lesson.te ? lesson.te.map(t => t.longname).join(', ') : 'No teacher specified';
   const inf = lesson.info ? `\n\nInfo: ${lesson.info}` : '';
   const fullinfo = `Teacher: ${teachers}${inf}`;
   return { subjects, rooms, fullinfo };
 };
 
-// Generate ICS calendar
+// Helper: Env or query
+const getCred = (queryValue, envVar) => queryValue || envVar;
+
+// === CALENDAR ROUTE ===
 app.get('/calendar.ics', async (req, res) => {
   try {
+    // Cache prüfen
     if (calendarCache.data && Date.now() - calendarCache.timestamp < calendarCache.ttl) {
       return res.set({
         'Content-Disposition': 'attachment; filename="timetable.ics"',
@@ -74,27 +70,45 @@ app.get('/calendar.ics', async (req, res) => {
         const endMinute = lesson.endTime % 100;
         const { subjects, rooms, fullinfo } = applyRemap(lesson);
 
-        const startDT = DateTime.fromObject({ year, month, day, hour: startHour, minute: startMinute }, { zone: 'Europe/Berlin' }).toUTC();
-        const endDT = DateTime.fromObject({ year, month, day, hour: endHour, minute: endMinute }, { zone: 'Europe/Berlin' }).toUTC();
+        const startDT = DateTime.fromObject(
+          { year, month, day, hour: startHour, minute: startMinute }, 
+          { zone: 'Europe/Berlin' }
+        ).toUTC();
 
-        return { start: [startDT.year, startDT.month, startDT.day, startDT.hour, startDT.minute], end: [endDT.year, endDT.month, endDT.day, endDT.hour, endDT.minute], title: subjects, location: rooms, description: fullinfo };
+        const endDT = DateTime.fromObject(
+          { year, month, day, hour: endHour, minute: endMinute }, 
+          { zone: 'Europe/Berlin' }
+        ).toUTC();
+
+        return {
+          start: [startDT.year, startDT.month, startDT.day, startDT.hour, startDT.minute],
+          end:   [endDT.year, endDT.month, endDT.day, endDT.hour, endDT.minute],
+          title: subjects,
+          location: rooms,
+          description: fullinfo
+        };
       });
 
     // Merge consecutive events
-    const merged = [];
+    const mergedEvents = [];
     let current = events[0];
     for (let i = 1; i < events.length; i++) {
       const next = events[i];
-      if (current.title === next.title && current.location === next.location && current.description === next.description && current.end.join() === next.start.join()) {
+      if (
+        current.title === next.title &&
+        current.location === next.location &&
+        current.description === next.description &&
+        current.end.join() === next.start.join()
+      ) {
         current.end = next.end;
       } else {
-        merged.push(current);
+        mergedEvents.push(current);
         current = next;
       }
     }
-    if (current) merged.push(current);
+    if (current) mergedEvents.push(current);
 
-    createEvents(merged, (err, value) => {
+    createEvents(mergedEvents, (err, value) => {
       if (err) return res.status(500).send('Error generating calendar.');
       calendarCache.data = value;
       calendarCache.timestamp = Date.now();
@@ -119,33 +133,6 @@ app.get('/', (req, res) => {
     password: process.env.WEBUNTIS_PASSWORD
   });
   res.redirect(`/calendar.ics?${params.toString()}`);
-});
-
-// Web interface to view and edit remapping
-app.get('/remap', (req, res) => {
-  const renderMap = (obj) => Object.entries(obj).map(([k,v]) => `<tr><td>${k}</td><td><input name="${k}" value="${v}" /></td></tr>`).join('');
-  res.send(`
-    <h2>Remap Subjects</h2>
-    <form method="POST">
-      <h3>Subjects</h3>
-      <table>${renderMap(remap.subjects)}</table>
-      <h3>Rooms</h3>
-      <table>${renderMap(remap.rooms)}</table>
-      <h3>Teachers</h3>
-      <table>${renderMap(remap.teachers)}</table>
-      <button type="submit">Update Remapping</button>
-    </form>
-  `);
-});
-
-// Handle remap updates
-app.post('/remap', (req, res) => {
-  Object.keys(remap.subjects).forEach(key => { if(req.body[key]) remap.subjects[key] = req.body[key]; });
-  Object.keys(remap.rooms).forEach(key => { if(req.body[key]) remap.rooms[key] = req.body[key]; });
-  Object.keys(remap.teachers).forEach(key => { if(req.body[key]) remap.teachers[key] = req.body[key]; });
-  // Clear cache after remap
-  calendarCache.data = null;
-  res.redirect('/remap');
 });
 
 app.listen(port, () => console.log(`ICSUntis running on port ${port}`));

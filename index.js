@@ -1,3 +1,5 @@
+//made by Eqruscan
+
 import express from 'express';
 import { createEvents } from 'ics';
 import { WebUntis } from 'webuntis';
